@@ -1,5 +1,6 @@
 #!/usr/bin/env python2.7
 
+import Queue
 import json
 import networkx as nx
 
@@ -8,6 +9,7 @@ class Diplobot(object):
     def __init__(self, nationality):
         self.nationality = nationality
         self.supply_centers = list()
+        self.owned = set()
         self.board = self.default_game_world()
 
     def default_game_world(self):
@@ -33,18 +35,58 @@ class Diplobot(object):
                           {'owner': [new owner], 'strength': [# armies there]}
         """
         for territory, info in owners_dict.iteritems():
+            if territory in self.owned and info['owner'] != self.nationality:
+                self.owned.remove(territory)
+            elif info['owner'] == self.nationality:
+                self.owned.add(territory)
             self.board.node[territory]['belongsnto'] = info['owner']
             self.board.node[territory]['strength'] = info['strength']
 
     def score_territories(self):
-        """Compute the scores for each node territory on the board
+        """Compute the scores for each node territory on the board.
+
+        Scoring algorithm:
+        - Each supply center we own gets a score equal to the size of the largest
+          adjacent force.
+        - Each supply center we don't own gets a score equal to the size of the
+          current owner's force.
+        - Everything else starts at zero
+        - Each coast gets a score equal to the its score times the sum of the
+          scores of adjacent coasts weighted by a constant factor.
+        - For each territory, calculate the strength of the attack we have on
+          it versus the strength of the competetion for that territory.
+
         """
         for center in self.supply_centers:
             info = self.board.node[center]
             if info['belongsto'] == self.nationality:
                 info['score'] = sum(ter['strength'] for ter
-                        in self.board.adj(center)
+                        in self.board.adj[center].keys()
                         if ter['belongsto'] != self.nationality)
             else:
                 info['score'] = info['strength']
+        search_queue = Queue.Queue()
+        visited = set(self.supply_centers)
+        weight = 0.2
+        while search_queue.not_empty():
+            nd = search_queue.get()
+            if nd in visited:
+                continue
+            visited.add(nd)
+            self.board.node[nd]['score'] = weight * sum(ter['score'] for
+                    ter in self.board.adj[nd].keys()
+                    if ter in visited)
+            adj = self.board.adj[nd].keys()
+            for terr in adj:
+                search_queue.put(terr)
+
+    def next_move(self):
+        """Determine the orders to give for the next turn.
+
+        Gives orders in the form of [('Ter1', 'move', 'Ter2'), ('Ter3',
+        'support', 'Ter1')].
+
+        :returns: A list of tuples giving the orders for the next turn.
+        """
+        pass
 
