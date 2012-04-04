@@ -3,22 +3,36 @@
 import Queue
 import json
 import networkx as nx
+import requests
 
 class Diplobot(object):
 
-    def __init__(self, nationality):
+    def __init__(self, nationality, server='localhost', port=3000,
+            aggressiveness=1, defensiveness=1):
         self.nationality = nationality
+        # Higher aggressiveness => more likely to attack vulnerable territories
+        self.aggressiveness = aggressiveness
+        # Higher defensiveness => more likely to defened threatened territories
+        self.defensiveness = defensiveness
+        self.server = server
+        self.port = port
         self.supply_centers = list()
         self.owned = set()
         self.board = self.default_game_world()
 
     def default_game_world(self):
+        """Create the default Diplomacy board.
+
+        :returns: A nx.Graph representing the default Diplomacy board.
+        """
         territories = json.load(open('board.js'))
         board = nx.Graph()
         for territory, info in territories.iteritems():
+            if info['belongsto'] == self.nationality:
+                self.owned.add(territory)
             board.add_node(territory, fullname=info['fullname'],
                     supply=info['supply'], belongsto=info['belongsto'],
-                    score=0)
+                    score=0, strength=0)
             if info['supply'] == 1:
                 self.supply_centers.append(territory)
         for territory, info in territories.iteritems():
@@ -59,16 +73,21 @@ class Diplobot(object):
         """
         for center in self.supply_centers:
             info = self.board.node[center]
+            # TODO: Weight these scores by some internal "aggressiveness"
+            # measure, to reflect how reckless we'll be?
             if info['belongsto'] == self.nationality:
-                info['score'] = sum(ter['strength'] for ter
+                info['score'] = (sum(self.board.node[ter]['strength'] for ter
                         in self.board.adj[center].keys()
-                        if ter['belongsto'] != self.nationality)
-            else:
+                        if self.board.node[ter]['belongsto'] != self.nationality)
+                    - info['strength'])
+            elif 'strength' in info:
                 info['score'] = info['strength']
+            else:
+                info['score'] = 0
         search_queue = Queue.Queue()
         visited = set(self.supply_centers)
         weight = 0.2
-        while search_queue.not_empty():
+        while not search_queue.empty():
             nd = search_queue.get()
             if nd in visited:
                 continue
@@ -88,5 +107,34 @@ class Diplobot(object):
 
         :returns: A list of tuples giving the orders for the next turn.
         """
-        pass
+        orders = list()
+        for ter in self.owned:
+            possible = sorted(
+                    [adj for adj in self.board.adj[ter].keys()] + [ter],
+                    key=lambda n: self.board.node[n]['score'])
+            # TODO: Should randomly choose among the few best
+            # TODO: What type of order is issued?
+            # TODO: When to hold?
+            orders.append((ter, possible[0]))
+        return orders
 
+    def next_secondary_move(self, units_available):
+        """The next secondary move - i.e. where to place available
+        reinforcements.
+
+        :returns: A list of territories in which to place reinforcements.
+        """
+        to_reinforce = list()
+        for i in xrange(units_available):
+            ter = sorted(self.supply_centers,
+                    key=lambda t: self.board.node[t]['score'])[0]
+            to_reinforce.append(ter)
+            self.board.node[ter]['strength'] += 1
+            self.score_territories()
+        return to_reinforce
+
+    def run(self):
+        """Start the bot running a game connecting with the given server
+        """
+        r = requests.get('http://{}:{}/game'.format(self.server, self.port))
+        return r
