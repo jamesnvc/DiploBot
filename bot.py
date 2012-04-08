@@ -3,7 +3,15 @@
 import Queue
 import json
 import networkx as nx
+import websocket
+import random
 import requests
+
+def id_gen(start=1):
+    num = start
+    while True:
+        yield num
+        num += 1
 
 class Diplobot(object):
 
@@ -19,6 +27,7 @@ class Diplobot(object):
         self.supply_centers = list()
         self.owned = set()
         self.board = self.default_game_world()
+        self.session_id = None
 
     def default_game_world(self):
         """Create the default Diplomacy board.
@@ -115,7 +124,15 @@ class Diplobot(object):
             # TODO: Should randomly choose among the few best
             # TODO: What type of order is issued?
             # TODO: When to hold?
-            orders.append((ter, possible[0]))
+            to = possible[min(int(abs(random.gauss(0, 2))), len(possible))]
+            mtype = 'm'
+            orders.append({
+                'move': mtype,
+                'from': ter,
+                'to': to,
+                'tag': '',
+                'support': 0
+            })
         return orders
 
     def next_secondary_move(self, units_available):
@@ -133,8 +150,60 @@ class Diplobot(object):
             self.score_territories()
         return to_reinforce
 
-    def run(self):
+    def server_msg(self, ws, msg):
+        print "Got server msg: {}".format(msg)
+        msg_type = msg.split(':')[0]
+        if msg_type == '1':
+            print "Got connect msg"
+            msg = ':'.join(['5', '1', '',
+                json.dumps({'name': 'user:login',
+                    'args': [{'name': 'Diplobot'}, None]})])
+            print "Sending msg {}".format(msg)
+            ws.send(msg)
+            return
+        if msg_type == '2': # Heartbeat
+            ws.send('2::')
+            return
+        if msg_type == '5':
+            data = json.loads(msg.split(':')[-1])
+            event = data['name']
+            args = data['args'][0]
+            if event == 'login':
+                self.user_id = args['_id']
+            return
+
+    def server_err(self, ws, err):
+        print "Got server err: {}".format(err)
+
+    def server_close(self, ws):
+        print "Connection closed"
+        if self.restart:
+            self.start()
+
+    def server_connected(self, ws):
+        """Connected to server.
+
+        :ws: websocket object
+        """
+        print "Connection opened"
+
+    def handshake(self):
+        r = requests.post('http://{}:{}/socket.io/1'.format(
+            self.server, self.port))
+        self.session_id = r.text.split(':')[0]
+
+    def start(self):
         """Start the bot running a game connecting with the given server
         """
-        r = requests.get('http://{}:{}/game'.format(self.server, self.port))
-        return r
+        if self.session_id is None:
+            self.handshake()
+        self.sock = websocket.WebSocketApp(
+                url = "ws://{}:{}/socket.io/1/websocket/{}".format(
+                    self.server, self.port, self.session_id),
+                on_message=self.server_msg,
+                on_error=self.server_err,
+                on_close=self.server_close)
+        self.restart = self.session_id is None
+        self.sock.on_open = self.server_connected
+        self.sock.run_forever()
+
