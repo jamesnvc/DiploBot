@@ -27,6 +27,7 @@ class Diplobot(object):
         self.supply_centers = list()
         self.owned = set()
         self.board = self.default_game_world()
+        self.user_id = None
         self.session_id = None
 
     def default_game_world(self):
@@ -150,9 +151,29 @@ class Diplobot(object):
             self.score_territories()
         return to_reinforce
 
+    def send_orders(self, orders):
+        self.sock.send(':'.join(['5', '', '', json.dumps({
+            'name': 'db',
+            'args': [{
+                'action': 'POST',
+                'collection': 'orders',
+                'data': orders
+            }, None]
+        })]))
+
+    def get_games(self):
+        print "Sending request for games"
+        self.sock.send(':'.join(['5', '', '', json.dumps({
+            'name': 'db',
+            'args': [{
+                'action': 'GET',
+                'collection': 'game'
+                }, None]
+            })]))
+
     def server_msg(self, ws, msg):
-        print "Got server msg: {}".format(msg)
         msg_type = msg.split(':')[0]
+        print "msg type: {}".format(msg_type)
         if msg_type == '1':
             print "Got connect msg"
             msg = ':'.join(['5', '1', '',
@@ -161,15 +182,28 @@ class Diplobot(object):
             print "Sending msg {}".format(msg)
             ws.send(msg)
             return
-        if msg_type == '2': # Heartbeat
+        if msg_type == '2':
+            print "Got heartbeat message"
             ws.send('2::')
             return
         if msg_type == '5':
-            data = json.loads(msg.split(':')[-1])
+            print "Got event message"
+            data = json.loads(msg[(msg.find('{')):])
             event = data['name']
-            args = data['args'][0]
+            print "Event {}".format(event)
+            args = None
+            if 'args' in data:
+                args = data['args'][0]
             if event == 'login':
                 self.user_id = args['_id']
+                self.get_games()
+            elif event == 'game:join':
+                print "Joining game {}".format(args['gameId'])
+            elif event == 'update:newgame':
+                print "Game created"
+            elif event == 'db:response':
+                print "Got database response"
+                print [game['_id'] for game in args]
             return
 
     def server_err(self, ws, err):
