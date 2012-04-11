@@ -17,6 +17,7 @@ class Diplobot(object):
 
     def __init__(self, nationality, server='localhost', port=3000,
             aggressiveness=1, defensiveness=1):
+        # NB: This gets overwritten when connecting to the server game
         self.nationality = nationality
         # Higher aggressiveness => more likely to attack vulnerable territories
         self.aggressiveness = aggressiveness
@@ -27,8 +28,11 @@ class Diplobot(object):
         self.supply_centers = list()
         self.owned = set()
         self.board = self.default_game_world()
+        # State for server communication
         self.user_id = None
+        self.player_id = None
         self.session_id = None
+        self.game_id = None
 
     def default_game_world(self):
         """Create the default Diplomacy board.
@@ -52,19 +56,42 @@ class Diplobot(object):
                 board.add_edge(territory, adj, type='army')
         return board
 
+    def extract_owners(self, units_list):
+        """Process the units list from the server to a dict of owners for
+        :update_board:.
+
+        :units_list: List of units from the server
+        :returns: Dict of owners suitable to be given to :update_board:.
+        """
+        utypes = {'a': 'army', 'f': 'fleet'}
+        owners_dict = dict()
+        for unit in units_list:
+            if unit['province'] in owners_dict:
+                owners_dict[unit['province']]['strength'] += 1
+            else:
+                owners_dict[unit['province']] = {
+                        'belongsto': unit['owner'],
+                        'type': utypes[unit['utype']],
+                        'strength': 1}
+        return owners_dict
+
+
     def update_board(self, owners_dict):
         """Update the board to reflect the current game state.
 
         :owners_dict: Dictionary of {'Territory':
-                          {'owner': [new owner], 'strength': [# armies there]}
+                          {'belongsto': [new owner], 'strength': [# armies there]}
         """
+        print "Updating board with new owners"
         for territory, info in owners_dict.iteritems():
-            if territory in self.owned and info['owner'] != self.nationality:
+            if territory in self.owned and info['belongsto'] != self.nationality:
                 self.owned.remove(territory)
-            elif info['owner'] == self.nationality:
+            elif info['belongsto'] == self.nationality:
                 self.owned.add(territory)
-            self.board.node[territory]['belongsnto'] = info['owner']
+            self.board.node[territory]['belongsto'] = info['belongsto']
             self.board.node[territory]['strength'] = info['strength']
+            self.board.node[territory]['type'] = info['type']
+        print "Board updated"
 
     def score_territories(self):
         """Compute the scores for each node territory on the board.
@@ -119,21 +146,31 @@ class Diplobot(object):
         """
         orders = list()
         for ter in self.owned:
-            possible = sorted(
-                    [adj for adj in self.board.adj[ter].keys()] + [ter],
-                    key=lambda n: self.board.node[n]['score'])
-            # TODO: Should randomly choose among the few best
-            # TODO: What type of order is issued?
-            # TODO: When to hold?
-            to = possible[min(int(abs(random.gauss(0, 2))), len(possible))]
-            mtype = 'm'
-            orders.append({
-                'move': mtype,
-                'from': ter,
-                'to': to,
-                'tag': '',
-                'support': 0
-            })
+            if self.board.node[ter]['strength'] > 0:
+                possible = sorted(
+                        [adj for adj in self.board.adj[ter].keys()] + [ter],
+                        key=lambda n: self.board.node[n]['score'],
+                        reverse=True)
+                # TODO: Should randomly choose among the few best
+                # TODO: What type of order is issued?
+                # TODO: When to hold?
+                to = possible[min(int(abs(random.gauss(0, 2))), len(possible))]
+                mtype = 'm'
+                to_node = self.board.node[to]
+                if to == ter:
+                    mtype = 'h'
+                elif to_node['belongsto'] == self.nationality and to_node['strength'] != 0:
+                    mtype = 's'
+                orders.append({
+                    'order': {
+                        'move': mtype,
+                        'from': ter,
+                        'to': to
+                    },
+                    'owner': self.nationality,
+                    'utype': self.board.node[ter]['type'][0],
+                    'province': ter
+                })
         return orders
 
     def next_secondary_move(self, units_available):
@@ -145,7 +182,8 @@ class Diplobot(object):
         to_reinforce = list()
         for i in xrange(units_available):
             ter = sorted(self.supply_centers,
-                    key=lambda t: self.board.node[t]['score'])[0]
+                    key=lambda t: self.board.node[t]['score'],
+                    reverse=True)[0]
             to_reinforce.append(ter)
             self.board.node[ter]['strength'] += 1
             self.score_territories()
@@ -154,40 +192,40 @@ class Diplobot(object):
     def send_orders(self, orders):
         self.sock.send(':'.join(['5', '', '', json.dumps({
             'name': 'db',
-            'args': [{
-                'action': 'POST',
-                'collection': 'orders',
-                'data': orders
-            }, None]
+            'args': [{'action': 'update',
+                      'collection': 'player',
+                      'data': {
+                          'power': self.nationality,
+                          'user': self.user_id,
+                          '_id': self.player_id,
+                          'orders': orders
+                      }
+                  }, None]
         })]))
 
-    def get_games(self):
-        print "Sending request for games"
-        self.sock.send(':'.join(['5', '', '', json.dumps({
-            'name': 'db',
-            'args': [{
-                'action': 'GET',
-                'collection': 'game'
-                }, None]
-            })]))
-
     def server_msg(self, ws, msg):
+        """Process communications recieved over the server socket.
+
+        Since the server here is using socket.io, there is some processing of
+        the websocket message which must be done - see
+        <https://github.com/learnboost/socket.io-spec> for protocol details.
+
+        :ws: The Websocket which the server is communicating on
+        :msg: The message recieved from the server.
+        """
         msg_type = msg.split(':')[0]
-        print "msg type: {}".format(msg_type)
         if msg_type == '1':
             print "Got connect msg"
             msg = ':'.join(['5', '1', '',
                 json.dumps({'name': 'user:login',
                     'args': [{'name': 'Diplobot'}, None]})])
-            print "Sending msg {}".format(msg)
+            print "Logging in"
             ws.send(msg)
             return
-        if msg_type == '2':
-            print "Got heartbeat message"
+        if msg_type == '2': # Heartbeat message from server
             ws.send('2::')
             return
         if msg_type == '5':
-            print "Got event message"
             data = json.loads(msg[(msg.find('{')):])
             event = data['name']
             print "Event {}".format(event)
@@ -195,15 +233,46 @@ class Diplobot(object):
             if 'args' in data:
                 args = data['args'][0]
             if event == 'login':
+                print "Logged in as {}".format(args)
                 self.user_id = args['_id']
-                self.get_games()
             elif event == 'game:join':
-                print "Joining game {}".format(args['gameId'])
+                print "Joining game {} as {}".format(
+                        args['gameId'], args['nationality'])
+                self.nationality = args['nationality']
+                self.game_id = args['gameId']
+                ws.send(':'.join(['5', '', '', json.dumps({
+                    'name': 'bot:joingame',
+                    'args': [{
+                        'gameId': self.game_id,
+                        'botId': self.user_id,
+                        'power': self.nationality
+                    }]
+                })]))
+            elif event == 'bot:playerId':
+                self.player_id = args['playerId']
             elif event == 'update:newgame':
                 print "Game created"
             elif event == 'db:response':
                 print "Got database response"
                 print [game['_id'] for game in args]
+            elif event == 'update:force':
+                print "Force update to {} recieved".format(args['collection'])
+                print 'Arg keys: {}'.format(args.keys())
+                print 'Data keys: {}'.format(args['data'].keys())
+                if args['collection'] == 'game':
+                    print "Game state is now {}".format(args['data']['state'])
+                    self.update_board(self.extract_owners(args['data']['units']))
+                    print "Calculating next move"
+                    if args['data']['state'] == 'primary':
+                        orders = self.next_move()
+                        print "Sending orders {}".format(orders)
+                        self.send_orders(orders)
+                    elif args['data']['state'] == 'secondary':
+                        print "Secondary moves: {}".format(args)
+                        orders = self.next_secondary_move()
+                        self.send_orders(orders)
+                    else:
+                        print "Unknown game state"
             return
 
     def server_err(self, ws, err):
