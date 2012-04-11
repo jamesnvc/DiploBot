@@ -1,4 +1,7 @@
 #!/usr/bin/env python2.7
+"""Implementation of my Diplomacy bot, designed to play with the node Diplomacy
+game at <https://github.com/rafd/Diplomacy> via websockets
+"""
 
 import Queue
 import json
@@ -13,7 +16,9 @@ def id_gen(start=1):
         yield num
         num += 1
 
+# TODO: Split apart into bot & server communication (which can have many bots)
 class Diplobot(object):
+    """Class representing an instance of the Diplomacy-playing bot."""
 
     def __init__(self, nationality, server='localhost', port=3000,
             aggressiveness=1, defensiveness=1):
@@ -139,10 +144,17 @@ class Diplobot(object):
     def next_move(self):
         """Determine the orders to give for the next turn.
 
-        Gives orders in the form of [('Ter1', 'move', 'Ter2'), ('Ter3',
-        'support', 'Ter1')].
+        Gives orders in the form of [{'order': {
+                                        'move': 'h'/'m'/'s',
+                                        'from': territory issuing order,
+                                        'to': destination
+                                      },
+                                      'owner': nationality
+                                      'utype': 'a' or 'f'
+                                      'province': territory issuing order
+                                    }, ...]
 
-        :returns: A list of tuples giving the orders for the next turn.
+        :returns: A list of dicts giving the orders for the next turn.
         """
         orders = list()
         for ter in self.owned:
@@ -190,6 +202,11 @@ class Diplobot(object):
         return to_reinforce
 
     def send_orders(self, orders):
+        """Transmit the list of orders given to the server.
+
+        :orders: A list of dicts in the form required by the server (see
+                 :next_move: for details).
+        """
         self.sock.send(':'.join(['5', '', '', json.dumps({
             'name': 'db',
             'args': [{'action': 'update',
@@ -269,16 +286,30 @@ class Diplobot(object):
                         self.send_orders(orders)
                     elif args['data']['state'] == 'secondary':
                         print "Secondary moves: {}".format(args)
-                        orders = self.next_secondary_move()
+                        # TODO: How many secondary moves do we have?
+                        orders = self.next_secondary_move(1)
                         self.send_orders(orders)
                     else:
                         print "Unknown game state"
             return
 
     def server_err(self, ws, err):
+        """Called when the websocket gives an error.
+
+        Note that since the communication with the server uses socket.io over
+        the websocket, this will only given transport-layer errors, application
+        errors will come to :server_msg: in the socket.io method.
+
+        :ws: Websocket
+        :err: Error message from server
+        """
         print "Got server err: {}".format(err)
 
     def server_close(self, ws):
+        """Connection to server closed
+
+        :ws: Websocket
+        """
         print "Connection closed"
         if self.restart:
             self.start()
@@ -291,6 +322,11 @@ class Diplobot(object):
         print "Connection opened"
 
     def handshake(self):
+        """Make the initial handshake request to the server.
+
+        This gives us the session id we will use to establish the websocket
+        connection.
+        """
         r = requests.post('http://{}:{}/socket.io/1'.format(
             self.server, self.port))
         self.session_id = r.text.split(':')[0]
